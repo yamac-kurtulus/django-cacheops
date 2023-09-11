@@ -1,13 +1,23 @@
 import re
 import json
 import inspect
-from funcy import memoize, compose, wraps, any, any_fn, select_values, mapcat
+from funcy import memoize, compose, wraps, any, any_fn, select_values, lmapcat
 
 from django.db import models
-from django.http import HttpRequest
 
 from .conf import model_profile
 
+def _check_request(request):
+    # Ensure argument looks like a request.
+    if not hasattr(request, "META"):
+        raise TypeError(
+            "A view should be passed with HttpRequest as first argument. If you are "
+            "decorating a classmethod, be sure to use @method_decorator."
+        )
+
+def get_table_model(model):
+    return next((b for b in model.__mro__ if issubclass(b, models.Model) and b is not models.Model
+                 and not b._meta.proxy and not b._meta.abstract), None)
 
 def model_family(model):
     """
@@ -16,19 +26,14 @@ def model_family(model):
     We simply collect a list of all proxy models, including subclasess, superclasses and siblings.
     Two descendants of an abstract model are not family - they cannot affect each other.
     """
-    if model._meta.abstract:  # No table - no family
-        return set()
-
-    @memoize
     def class_tree(cls):
-        # NOTE: we also list multitable submodels here, we just don't care.
-        #       Cacheops doesn't support them anyway.
-        return {cls} | set(mapcat(class_tree, cls.__subclasses__()))
+        return [cls] + lmapcat(class_tree, cls.__subclasses__())
 
-    table_bases = {b for b in model.__mro__ if issubclass(b, models.Model) and b is not models.Model
-                   and not b._meta.proxy and not b._meta.abstract}
-    family = set(mapcat(class_tree, table_bases))
-    return {cls for cls in family if not cls._meta.abstract}
+    # NOTE: we also list multitable submodels here, we just don't care.
+    #       Cacheops doesn't support them anyway.
+    table_model = get_table_model(model)
+    return class_tree(table_model) if table_model else []
+
 
 @memoize
 def family_has_profile(cls):
@@ -106,8 +111,9 @@ def cached_view_fab(_cached):
 
             @wraps(func)
             def wrapper(request, *args, **kwargs):
-                assert isinstance(request, HttpRequest),                            \
-                       "A view should be passed with HttpRequest as first argument"
+
+                _check_request(request)
+
                 if request.method not in ('GET', 'HEAD'):
                     return func(request, *args, **kwargs)
 
